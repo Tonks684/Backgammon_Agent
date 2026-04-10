@@ -3,19 +3,37 @@
 Both sides of every game use the same agent (true self-play).  States are
 always encoded from White's perspective so that the TD target is consistent
 across the entire trajectory.
+
+Parallelism
+-----------
+play_batch() distributes game generation across n_workers CPU processes.
+Each worker receives a snapshot of the current network weights (CPU tensors),
+plays n games independently, and returns the trajectories.  The main process
+then runs the TD(λ) update on GPU sequentially over the collected batch.
+
+Scaling up:
+  - More CPU cores  → increase n_workers in Config
+  - Bigger GPU      → increase batch_size in Config
+  - Multiple GPUs   → increase n_gpus in Config (triggers DDP in trainer)
 """
 
 from __future__ import annotations
 
 import random
+from multiprocessing import Pool
 from typing import Type
 
 import numpy as np
+import torch
 
 from backgammon.game.board import Board
 from backgammon.game.encoder import encode
 from backgammon.game.types import DiceRoll, GameResult, Player
 
+
+# ---------------------------------------------------------------------------
+# Single-game loop (used by workers and directly in tests)
+# ---------------------------------------------------------------------------
 
 def play_game(
     agent,
@@ -23,65 +41,31 @@ def play_game(
 ) -> tuple[list[tuple[np.ndarray, np.ndarray]], GameResult]:
     """Play one complete game using *agent* for both sides.
 
-    Trajectory encoding convention:
-        All states are encoded from ``Player.WHITE``'s perspective so that the
-        value-network target is always expressed in the same coordinate frame.
-        When it is BLACK's turn the board is still encoded from WHITE's viewpoint
-        — the network sees a board where WHITE's equity has dropped after BLACK's
-        move, which is exactly the signal needed for the TD update.
-
-    Parameters
-    ----------
-    agent:
-        Any agent implementing
-        ``select_move(board, legal_move_sequences, player) -> list[Move]``.
-    board_cls:
-        Board class to instantiate (injectable for testing).
-
-    Returns
-    -------
-    trajectory:
-        List of ``(state_before, state_after)`` pairs, one per half-move.
-        Each element is a pair of ``(54,)`` float32 numpy arrays encoded from
-        White's perspective.
-    result:
-        Terminal ``GameResult`` (never ``IN_PROGRESS``).
+    All states encoded from WHITE's perspective — see module docstring.
     """
     board = board_cls()
     trajectory: list[tuple[np.ndarray, np.ndarray]] = []
 
-    # Safety cap — a real backgammon game is almost never longer than ~300
-    # half-moves; cap at 500 to guard against bugs/infinite loops.
     for _ in range(500):
         if board.is_terminal():
             break
 
         player = board.current_player
-        d1 = random.randint(1, 6)
-        d2 = random.randint(1, 6)
-        dice = DiceRoll(d1, d2)
-
+        dice = DiceRoll(random.randint(1, 6), random.randint(1, 6))
         legal_seqs = board.get_legal_moves(dice)
 
-        # Encode state *before* the move (from WHITE's perspective)
         state_before = encode(board, Player.WHITE)
-
         seq = agent.select_move(board, legal_seqs, player)
 
         if seq:
             board.apply_move_sequence(seq)
         else:
-            # Forced pass — just switch player
             board.current_player = board.current_player.opponent()
 
-        # Encode state *after* the move (still from WHITE's perspective)
         state_after = encode(board, Player.WHITE)
-
         trajectory.append((state_before, state_after))
 
     result = board.get_result()
-    # If somehow the loop ended without a terminal state, declare a draw-like
-    # result as black win (should not happen in normal play).
     if result == GameResult.IN_PROGRESS:
         result = GameResult.BLACK_WIN
 
@@ -93,20 +77,89 @@ def play_n_games(
     n: int,
     board_cls: Type[Board] = Board,
 ) -> list[GameResult]:
-    """Play *n* self-play games and return the list of results.
+    """Play n self-play games sequentially, return results."""
+    return [play_game(agent, board_cls=board_cls)[1] for _ in range(n)]
+
+
+# ---------------------------------------------------------------------------
+# Parallel batch generation
+# ---------------------------------------------------------------------------
+
+def _worker_fn(args: tuple) -> list[tuple]:
+    """Worker entry point — runs in a separate process.
+
+    Receives network weights as CPU state-dict (picklable), reconstructs
+    a local CPU agent, plays n_games, returns trajectories + results.
+    """
+    state_dict, n_games, hidden_size, n_hidden_layers, alpha, lambda_ = args
+
+    # Import locally — avoids issues with CUDA handles being inherited
+    from backgammon.agents.td_lambda import TDLambdaAgent
+    from backgammon.config import Config
+    from backgammon.models.mlp import ValueNetwork
+
+    network = ValueNetwork(hidden_size=hidden_size, n_hidden_layers=n_hidden_layers)
+    network.load_state_dict(state_dict)
+
+    cfg = Config(alpha=alpha, lambda_=lambda_,
+                 hidden_size=hidden_size, n_hidden_layers=n_hidden_layers)
+    agent = TDLambdaAgent(network, cfg, device=torch.device("cpu"))
+
+    return [play_game(agent) for _ in range(n_games)]
+
+
+def play_batch(
+    agent,
+    total_games: int,
+    n_workers: int,
+) -> list[tuple[list[tuple[np.ndarray, np.ndarray]], GameResult]]:
+    """Play total_games games across n_workers parallel CPU processes.
 
     Parameters
     ----------
     agent:
-        Agent with a ``select_move`` method (same agent used for both sides).
-    n:
-        Number of games to play.
-    board_cls:
-        Board class to instantiate.
+        The current TDLambdaAgent.  Its network weights are snapshotted and
+        sent to each worker — the agent itself is NOT mutated.
+    total_games:
+        Total number of games to play across all workers.
+    n_workers:
+        Number of parallel CPU processes.
 
     Returns
     -------
-    list[GameResult]
-        Terminal results, one per game, in order.
+    List of (trajectory, result) pairs, one per game.
+
+    Scaling
+    -------
+    Increase n_workers (= Config.n_workers) to use more CPU cores.
+    On Lightning.ai free plan: n_workers=32 matches the 32-core CPU Studio.
+    On a beefier VM: n_workers=64 or higher.
     """
-    return [play_game(agent, board_cls=board_cls)[1] for _ in range(n)]
+    # Snapshot weights as CPU tensors — safe to pickle across processes
+    state_dict = {k: v.cpu() for k, v in agent.network.state_dict().items()}
+
+    games_per_worker = max(1, total_games // n_workers)
+    # Handle remainder so we always hit total_games
+    worker_counts = [games_per_worker] * n_workers
+    remainder = total_games - games_per_worker * n_workers
+    for i in range(remainder):
+        worker_counts[i] += 1
+
+    args = [
+        (
+            state_dict,
+            count,
+            agent.config.hidden_size,
+            agent.config.n_hidden_layers,
+            agent.config.alpha,
+            agent.config.lambda_,
+        )
+        for count in worker_counts
+        if count > 0
+    ]
+
+    with Pool(processes=len(args)) as pool:
+        nested = pool.map(_worker_fn, args)
+
+    # Flatten list-of-lists into a single list
+    return [item for batch in nested for item in batch]

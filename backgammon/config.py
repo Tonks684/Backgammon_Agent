@@ -24,6 +24,11 @@ class Config:
     checkpoint_dir: str = "data/checkpoints/"
     eval_dir: str = "data/evals/"
 
+    # Parallelism — scale these up as resources grow
+    n_workers: int = 32        # CPU workers for parallel game generation
+    batch_size: int = 32       # trajectories collected before each update step
+    n_gpus: int = 1            # set >1 to enable multi-GPU (triggers DDP)
+
     # Logging
     wandb_project: str = "backgammon-rl"
     run_name: Optional[str] = None
