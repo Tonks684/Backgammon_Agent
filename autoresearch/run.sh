@@ -9,9 +9,10 @@
 #   - 50 GB persistent storage -> results written to mounted ./data volume
 #
 # Usage (from repo root, on Lightning.ai Studio):
-#   bash autoresearch/run.sh                      # random search, runs forever
-#   bash autoresearch/run.sh --strategy grid      # exhaustive grid search
-#   bash autoresearch/run.sh --max-experiments 40 # stop after N experiments
+#   bash autoresearch/run.sh                          # 4 parallel, random search
+#   bash autoresearch/run.sh --parallel 8             # 8 parallel experiments
+#   bash autoresearch/run.sh --strategy grid          # exhaustive grid search
+#   bash autoresearch/run.sh --max-experiments 80     # stop after N experiments
 #
 # To run in the background and survive a terminal disconnect:
 #   nohup bash autoresearch/run.sh > data/autoresearch_logs/nohup.out 2>&1 &

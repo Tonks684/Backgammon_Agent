@@ -1,16 +1,19 @@
 """
-autoresearch/agent.py — hyperparameter search loop.
+autoresearch/agent.py — parallel hyperparameter search loop.
 
-Runs train.py repeatedly with different parameter combinations, logs results
-to data/autoresearch_results.jsonl, and prints a leaderboard. Kill with Ctrl-C.
+Runs N_PARALLEL experiments simultaneously, each using a share of the CPU
+workers and all sharing the GPU via time-multiplexing.
 
-Strategy: random search over the parameter grid. Simple, embarrassingly
-parallel-friendly, and surprisingly effective for <= 6 dimensions.
+Parallelism breakdown (32-core CPU, single H200):
+  N_PARALLEL=1 -> 1 experiment,  32 workers each  (~6 min per round)
+  N_PARALLEL=4 -> 4 experiments,  8 workers each  (~6 min per round, 4x throughput)
+  N_PARALLEL=8 -> 8 experiments,  4 workers each  (~6 min per round, 8x throughput)
 
 Usage (from repo root):
-    python autoresearch/agent.py
-    python autoresearch/agent.py --strategy grid   # exhaustive grid search
-    python autoresearch/agent.py --max-experiments 50
+  python autoresearch/agent.py                        # 4 parallel, random search
+  python autoresearch/agent.py --parallel 8           # 8 parallel
+  python autoresearch/agent.py --strategy grid        # exhaustive grid
+  python autoresearch/agent.py --max-experiments 80   # stop after N total
 """
 
 from __future__ import annotations
@@ -19,107 +22,52 @@ import argparse
 import datetime
 import json
 import random
-import re
-import subprocess
 import sys
-import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import product
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Parameter grid — edit these to expand / restrict the search space
+# Parameter grid
 # ---------------------------------------------------------------------------
 GRID = {
-    "ALPHA":          [0.001, 0.003, 0.005, 0.01, 0.02, 0.05],
-    "LAMBDA":         [0.5, 0.6, 0.7, 0.8, 0.9],
-    "HIDDEN_SIZE":    [64, 128, 256],
-    "N_HIDDEN_LAYERS":[1, 2, 3],
-    "BATCH_SIZE":     [16, 32, 64],
-    "N_WORKERS":      [32],   # keep at CPU core count
+    "ALPHA":           [0.001, 0.003, 0.005, 0.01, 0.02, 0.05],
+    "LAMBDA":          [0.5, 0.6, 0.7, 0.8, 0.9],
+    "HIDDEN_SIZE":     [64, 128, 256],
+    "N_HIDDEN_LAYERS": [1, 2, 3],
+    "BATCH_SIZE":      [16, 32, 64],
 }
 
-TRAIN_SCRIPT = Path(__file__).parent / "train.py"
-RESULTS_FILE = Path("data/autoresearch_results.jsonl")
-LOG_DIR      = Path("data/autoresearch_logs")
+TOTAL_CPU_WORKERS = 32   # match Lightning.ai free plan (32 cores)
+RESULTS_FILE      = Path("data/autoresearch_results.jsonl")
+LOG_DIR           = Path("data/autoresearch_logs")
+
+# ---------------------------------------------------------------------------
+# Worker entry point — must be top-level for ProcessPoolExecutor (spawn)
+# ---------------------------------------------------------------------------
+
+def _trial_worker(job: dict) -> dict:
+    """Runs in a subprocess. Calls trial.run_trial() and returns metrics."""
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from autoresearch.trial import run_trial
+
+    params      = job["params"]
+    n_workers   = job["n_workers"]
+    exp_id      = job["experiment_id"]
+
+    metrics = run_trial(params, n_workers=n_workers)
+
+    if metrics is None:
+        return {"experiment_id": exp_id, "failed": True, **params}
+
+    metrics["experiment_id"] = exp_id
+    metrics["timestamp"]     = datetime.datetime.utcnow().isoformat()
+    metrics.update(params)
+    return metrics
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _patch_train_py(params: dict) -> None:
-    """Overwrite the TUNABLE PARAMETERS block in train.py."""
-    src = TRAIN_SCRIPT.read_text(encoding="utf-8")
-
-    replacements = {
-        "ALPHA":           f"ALPHA         = {params['ALPHA']}",
-        "LAMBDA":          f"LAMBDA        = {params['LAMBDA']}",
-        "HIDDEN_SIZE":     f"HIDDEN_SIZE   = {params['HIDDEN_SIZE']}",
-        "N_HIDDEN_LAYERS": f"N_HIDDEN_LAYERS = {params['N_HIDDEN_LAYERS']}",
-        "BATCH_SIZE":      f"BATCH_SIZE    = {params['BATCH_SIZE']}",
-        "N_WORKERS":       f"N_WORKERS     = {params['N_WORKERS']}",
-    }
-
-    for key, new_line in replacements.items():
-        src = re.sub(
-            rf"^{key}\s*=.*$",
-            new_line,
-            src,
-            flags=re.MULTILINE,
-        )
-
-    TRAIN_SCRIPT.write_text(src, encoding="utf-8")
-
-
-def _parse_metrics(output: str) -> dict | None:
-    """Extract val_bpb and other metrics from train.py stdout."""
-    metrics: dict = {}
-    for line in output.splitlines():
-        m = re.match(r"^(\w+):\s+([\d.]+)$", line.strip())
-        if m:
-            key, val = m.group(1), m.group(2)
-            try:
-                metrics[key] = float(val)
-            except ValueError:
-                metrics[key] = val
-    return metrics if "val_bpb" in metrics else None
-
-
-def _run_experiment(params: dict, experiment_id: int) -> dict | None:
-    """Patch train.py, run it, parse output. Returns metrics dict or None."""
-    _patch_train_py(params)
-
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = LOG_DIR / f"exp_{experiment_id:04d}.log"
-
-    print(f"\n[Exp {experiment_id}] {params}")
-    print(f"  log -> {log_path}")
-
-    t0 = time.time()
-    proc = subprocess.run(
-        [sys.executable, str(TRAIN_SCRIPT)],
-        capture_output=True,
-        text=True,
-    )
-    wall = time.time() - t0
-
-    combined = proc.stdout + ("\n--- STDERR ---\n" + proc.stderr if proc.stderr else "")
-    log_path.write_text(combined, encoding="utf-8")
-
-    if proc.returncode != 0:
-        print(f"  FAILED (exit {proc.returncode}) — see {log_path}")
-        return None
-
-    metrics = _parse_metrics(proc.stdout)
-    if metrics is None:
-        print(f"  WARNING: val_bpb not found in output — see {log_path}")
-        return None
-
-    metrics["wall_seconds"] = round(wall, 1)
-    metrics["experiment_id"] = experiment_id
-    metrics["timestamp"] = datetime.datetime.utcnow().isoformat()
-    metrics.update(params)
-    return metrics
-
 
 def _save_result(metrics: dict) -> None:
     RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -128,14 +76,18 @@ def _save_result(metrics: dict) -> None:
 
 
 def _print_leaderboard(results: list[dict]) -> None:
-    sorted_r = sorted(results, key=lambda r: r["val_bpb"])
+    valid = [r for r in results if not r.get("failed") and "val_bpb" in r]
+    if not valid:
+        return
+    sorted_r = sorted(valid, key=lambda r: r["val_bpb"])
     print("\n--- Leaderboard (lower val_bpb = better) ---")
-    print(f"{'Rank':>4}  {'val_bpb':>8}  {'win_rate':>8}  params")
+    print(f"{'Rank':>4}  {'val_bpb':>8}  {'win_rate':>8}  {'episodes':>8}  params")
     for rank, r in enumerate(sorted_r[:10], 1):
-        p = (f"α={r['ALPHA']} λ={r['LAMBDA']} "
-             f"h={r['HIDDEN_SIZE']}×{r['N_HIDDEN_LAYERS']} "
-             f"bs={r['BATCH_SIZE']}")
-        print(f"{rank:>4}  {r['val_bpb']:>8.4f}  {r.get('win_rate', 0):>8.4f}  {p}")
+        p = (f"α={r.get('ALPHA')} λ={r.get('LAMBDA')} "
+             f"h={r.get('HIDDEN_SIZE')}×{r.get('N_HIDDEN_LAYERS')} "
+             f"bs={r.get('BATCH_SIZE')}")
+        print(f"{rank:>4}  {r['val_bpb']:>8.4f}  {r.get('win_rate',0):>8.4f}"
+              f"  {int(r.get('episodes',0)):>8,}  {p}")
     print()
 
 
@@ -148,22 +100,10 @@ def _grid_params() -> list[dict]:
     return [dict(zip(keys, combo)) for combo in product(*GRID.values())]
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Autoresearch hyperparameter search")
-    parser.add_argument("--strategy", choices=["random", "grid"], default="random")
-    parser.add_argument("--max-experiments", type=int, default=None,
-                        help="Stop after N experiments (default: run forever for random, "
-                             "exhaust grid for grid)")
-    args = parser.parse_args()
-
-    # Resume: load existing results so leaderboard and best are preserved,
-    # and experiment IDs + log files don't collide with previous runs.
+def _load_prior_results() -> tuple[list[dict], float, int]:
+    """Load existing results for resume. Returns (results, best_val_bpb, next_id)."""
     results: list[dict] = []
-    best_val_bpb = float("inf")
+    best = float("inf")
     if RESULTS_FILE.exists():
         with open(RESULTS_FILE, encoding="utf-8") as f:
             for line in f:
@@ -171,57 +111,110 @@ def main() -> None:
                 if line:
                     r = json.loads(line)
                     results.append(r)
-                    if r.get("val_bpb", float("inf")) < best_val_bpb:
-                        best_val_bpb = r["val_bpb"]
-        if results:
-            print(f"Resumed: loaded {len(results)} prior results, best val_bpb={best_val_bpb:.4f}")
+                    if r.get("val_bpb", float("inf")) < best:
+                        best = r["val_bpb"]
+    next_id = max((r.get("experiment_id", 0) for r in results), default=0) + 1
+    return results, best, next_id
 
-    experiment_id = max((r.get("experiment_id", 0) for r in results), default=0) + 1
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Parallel autoresearch hyperparameter search")
+    parser.add_argument("--strategy",        choices=["random", "grid"], default="random")
+    parser.add_argument("--parallel", "-p",  type=int, default=4,
+                        help="Number of experiments to run simultaneously (default: 4)")
+    parser.add_argument("--max-experiments", type=int, default=None)
+    args = parser.parse_args()
+
+    n_parallel  = args.parallel
+    n_workers   = max(1, TOTAL_CPU_WORKERS // n_parallel)
+
+    results, best_val_bpb, experiment_id = _load_prior_results()
+    if results:
+        print(f"Resumed: {len(results)} prior results, best val_bpb={best_val_bpb:.4f}")
+
+    print(f"Strategy : {args.strategy}")
+    print(f"Parallel : {n_parallel} experiments × {n_workers} CPU workers each")
+    print(f"GPU      : shared across all parallel experiments")
 
     if args.strategy == "grid":
         candidates = _grid_params()
-        random.shuffle(candidates)   # avoid bias from ordering
-        print(f"Grid search: {len(candidates)} combinations")
-        iterator = iter(candidates)
+        random.shuffle(candidates)
+        print(f"Grid     : {len(candidates)} total combinations")
+        candidate_iter = iter(candidates)
     else:
-        iterator = None
-        print("Random search: running until interrupted (Ctrl-C to stop)")
+        candidate_iter = None
+        print("Running until interrupted (Ctrl-C to stop)")
 
-    max_exp = args.max_experiments
+    max_exp    = args.max_experiments
+    total_done = len(results)
+
+    # Use 'spawn' context to avoid CUDA fork issues
+    import multiprocessing
+    mp_context = multiprocessing.get_context("spawn")
 
     try:
-        while True:
-            if args.strategy == "grid":
-                try:
-                    params = next(iterator)
-                except StopIteration:
+        with ProcessPoolExecutor(max_workers=n_parallel, mp_context=mp_context) as executor:
+            while True:
+                # Build a batch of n_parallel jobs
+                jobs = []
+                for _ in range(n_parallel):
+                    if args.strategy == "grid":
+                        try:
+                            params = next(candidate_iter)
+                        except StopIteration:
+                            break
+                    else:
+                        params = _random_params()
+
+                    jobs.append({
+                        "params":        params,
+                        "n_workers":     n_workers,
+                        "experiment_id": experiment_id,
+                    })
+                    experiment_id += 1
+
+                if not jobs:
                     print("Grid search complete.")
                     break
-            else:
-                params = _random_params()
 
-            metrics = _run_experiment(params, experiment_id)
+                print(f"\n=== Round: {n_parallel} experiments in parallel ===")
+                for j in jobs:
+                    print(f"  [Exp {j['experiment_id']}] {j['params']}")
 
-            if metrics is not None:
-                results.append(metrics)
-                _save_result(metrics)
+                futures = {executor.submit(_trial_worker, j): j for j in jobs}
+                round_results = []
 
-                val_bpb = metrics["val_bpb"]
-                marker = ""
-                if val_bpb < best_val_bpb:
-                    best_val_bpb = val_bpb
-                    marker = "  <-- NEW BEST"
-                print(f"  val_bpb={val_bpb:.4f}  win_rate={metrics.get('win_rate', 0):.4f}"
-                      f"  episodes={int(metrics.get('episodes', 0)):,}{marker}")
+                for future in as_completed(futures):
+                    metrics = future.result()
+                    job     = futures[future]
+                    exp_id  = job["experiment_id"]
 
-                if len(results) % 5 == 0:
-                    _print_leaderboard(results)
+                    if metrics.get("failed"):
+                        print(f"  [Exp {exp_id}] FAILED")
+                        continue
 
-            experiment_id += 1
+                    results.append(metrics)
+                    round_results.append(metrics)
+                    _save_result(metrics)
+                    total_done += 1
 
-            if max_exp is not None and experiment_id > max_exp:
-                print(f"Reached max experiments ({max_exp}).")
-                break
+                    marker = ""
+                    if metrics["val_bpb"] < best_val_bpb:
+                        best_val_bpb = metrics["val_bpb"]
+                        marker = "  <-- NEW BEST"
+
+                    print(f"  [Exp {exp_id}] val_bpb={metrics['val_bpb']:.4f}"
+                          f"  win_rate={metrics.get('win_rate',0):.4f}"
+                          f"  episodes={int(metrics.get('episodes',0)):,}{marker}")
+
+                _print_leaderboard(results)
+
+                if max_exp is not None and total_done >= max_exp:
+                    print(f"Reached max experiments ({max_exp}).")
+                    break
 
     except KeyboardInterrupt:
         print("\nInterrupted.")
