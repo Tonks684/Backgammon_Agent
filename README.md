@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://www.python.org/)
 
 <p align="center">
-  <img src="img/banner.png" alt="Backgammon RL Agent" width="720"/>
+  <img src="img/bg_agent.png" alt="Backgammon RL Agent" width="720"/>
 </p>
 
 A reinforcement learning agent for backgammon built from scratch in Python, targeting **GNU Backgammon Expert level and above**. The project implements a full TD(λ) self-play training pipeline with a PyTorch MLP value network, evaluated against GNU Backgammon at progressive skill levels.
