@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
+from multiprocessing import Pool
 
 from backgammon.agents.random_agent import RandomAgent
 from backgammon.agents.td_lambda import TDLambdaAgent
@@ -95,12 +96,14 @@ def main() -> None:
     episode = 0
     step = 0
 
-    while time.time() - t0 < BUDGET_SECONDS:
-        batch = play_batch(agent, BATCH_SIZE, N_WORKERS)
-        for trajectory, result in batch:
-            agent.update(trajectory, result)
-            episode += 1
-        step += 1
+    # Persistent pool — created once, eliminates ~2s spawn overhead per batch
+    with Pool(processes=N_WORKERS) as pool:
+        while time.time() - t0 < BUDGET_SECONDS:
+            batch = play_batch(agent, BATCH_SIZE, N_WORKERS, pool=pool)
+            for trajectory, result in batch:
+                agent.update(trajectory, result)
+                episode += 1
+            step += 1
 
     training_seconds = time.time() - t0
     win_rate = evaluate_vs_random(agent, n_games=500)
