@@ -1,0 +1,26 @@
+services:
+  backgammon-rl:
+    build: .
+    image: backgammon-rl:latest
+
+    # Mount the data directory so checkpoints and evals persist between runs
+    volumes:
+      - ./data:/workspace/data
+
+    # GPU access (requires nvidia-container-toolkit on the host)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # Pass wandb API key from the host environment
+    environment:
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - WANDB_MODE=${WANDB_MODE:-online}
+
+    # Keep stdin open so the container doesn't exit immediately on eval runs
+    stdin_open: true
+    tty: true

@@ -1,0 +1,31 @@
+# Version control
+.git
+.gitignore
+
+# Data — mounted as a volume at runtime, not baked into the image
+data/
+
+# Python caches and build artefacts
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Local dev tooling
+.venv/
+venv/
+.env
+*.env
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/

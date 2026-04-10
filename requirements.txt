@@ -1,6 +1,19 @@
-torch>=2.0
-numpy
-wandb
-h5py
-pytest
-pyyaml
+# Core ML — torch is supplied by the base image; pin here for local installs
+torch>=2.3.0
+numpy>=1.24
+
+# Logging & experiment tracking
+wandb>=0.16
+
+# Storage
+h5py>=3.9
+
+# Config
+pyyaml>=6.0
+
+# Testing
+pytest>=7.4
+
+# Game environment (optional gym wrapper — uncomment if using gym-backgammon)
+# gymnasium>=0.29
+# git+https://github.com/dellalibera/gym-backgammon.git
