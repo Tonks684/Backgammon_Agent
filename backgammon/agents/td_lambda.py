@@ -37,8 +37,9 @@ class TDLambdaAgent:
     At the terminal step, V(s_T) is replaced by compute_equity_target(result).
     """
 
-    def __init__(self, network: ValueNetwork, config: Config) -> None:
-        self.network = network
+    def __init__(self, network: ValueNetwork, config: Config, device: torch.device | None = None) -> None:
+        self.device = device or torch.device("cpu")
+        self.network = network.to(self.device)
         self.config = config
         self._alpha = config.alpha
         self._lambda = config.lambda_
@@ -86,7 +87,7 @@ class TDLambdaAgent:
 
                 # Always encode from WHITE's perspective to match training convention
                 state_vec = encode(next_board, Player.WHITE)
-                x = torch.tensor(state_vec, dtype=torch.float32)
+                x = torch.tensor(state_vec, dtype=torch.float32, device=self.device)
                 output = self.network(x)
                 eq = ValueNetwork.equity(output).item()
 
@@ -124,16 +125,16 @@ class TDLambdaAgent:
 
         self.network.train()
 
-        # Initialise eligibility traces (same shape as parameters)
+        # Initialise eligibility traces (same shape as parameters, on same device)
         traces = [torch.zeros_like(p) for p in self.network.parameters()]
         terminal_target = torch.tensor(
-            compute_equity_target(result), dtype=torch.float32
+            compute_equity_target(result), dtype=torch.float32, device=self.device
         )
 
         for t, (state_vec, next_state_vec) in enumerate(trajectory):
             is_terminal = t == len(trajectory) - 1
 
-            x_t = torch.tensor(state_vec, dtype=torch.float32)
+            x_t = torch.tensor(state_vec, dtype=torch.float32, device=self.device)
 
             # --- Forward pass for V(s_t) with gradient ---
             self.network.zero_grad()
@@ -145,7 +146,7 @@ class TDLambdaAgent:
             if is_terminal:
                 v_next = terminal_target
             else:
-                x_next = torch.tensor(next_state_vec, dtype=torch.float32)
+                x_next = torch.tensor(next_state_vec, dtype=torch.float32, device=self.device)
                 with torch.no_grad():
                     v_next = self.network(x_next)
 

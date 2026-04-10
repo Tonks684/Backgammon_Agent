@@ -126,18 +126,23 @@ def _load_config(path: str | None):
 
 def _build_agent(config, checkpoint: str | None = None):
     """Instantiate ValueNetwork + TDLambdaAgent, optionally loading weights."""
+    import torch
     from backgammon.agents.td_lambda import TDLambdaAgent
     from backgammon.models.mlp import ValueNetwork
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}"
+          + (f" ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""))
+
     if checkpoint is not None:
-        print(f"Loading weights from {checkpoint} …")
+        print(f"Loading weights from {checkpoint} ...")
         network = ValueNetwork.load_checkpoint(checkpoint)
     else:
         network = ValueNetwork(
             hidden_size=config.hidden_size,
             n_hidden_layers=config.n_hidden_layers,
         )
-    return TDLambdaAgent(network=network, config=config)
+    return TDLambdaAgent(network=network, config=config, device=device)
 
 
 def cmd_train(args: argparse.Namespace) -> None:

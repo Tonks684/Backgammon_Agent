@@ -190,15 +190,16 @@ class Trainer:
         from backgammon.evaluation.metrics import compute_equity_target
         from backgammon.models.mlp import ValueNetwork
 
+        device = self.agent.device
         terminal_eq = float(
             ValueNetwork.equity(
-                torch.tensor(compute_equity_target(result), dtype=torch.float32)
+                torch.tensor(compute_equity_target(result), dtype=torch.float32, device=device)
             )
         )
         # Use the first state's equity as a proxy for V(s_0)
         s0, _ = trajectory[0]
         with torch.no_grad():
-            v0 = self.agent.network(torch.tensor(s0, dtype=torch.float32))
+            v0 = self.agent.network(torch.tensor(s0, dtype=torch.float32, device=device))
             eq0 = float(ValueNetwork.equity(v0))
         return abs(terminal_eq - eq0)
 
