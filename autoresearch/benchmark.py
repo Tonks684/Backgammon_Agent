@@ -44,7 +44,9 @@ def _bench_worker_proc(job: dict, queue) -> None:
     try:
         result = _bench_worker(job)
     except Exception as e:
-        result = {"episodes": 0, "elapsed": 0, "ep_per_sec": 0,
+        import traceback
+        traceback.print_exc()
+        result = {"episodes": 0, "elapsed": job["budget_seconds"], "ep_per_sec": 0,
                   "peak_vram_mb": 0, "n_workers": job["n_workers"],
                   "error": str(e)}
     queue.put(result)
@@ -77,8 +79,7 @@ def _bench_worker(job: dict) -> dict:
         hidden_size=params["HIDDEN_SIZE"],
         n_hidden_layers=params["N_HIDDEN_LAYERS"],
     )
-    if hasattr(torch, "compile"):
-        network = torch.compile(network)
+    # No torch.compile here — JIT warmup dominates short budgets on CPU workers
 
     agent = TDLambdaAgent(network=network, config=config, device=device)
 
