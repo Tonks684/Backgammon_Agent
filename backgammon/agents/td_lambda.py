@@ -82,10 +82,10 @@ class TDLambdaAgent:
             for seq in legal_move_sequences:
                 # Apply move sequence to a scratch copy of the board
                 next_board = board.copy()
-                for move in seq:
-                    next_board.apply_move(move)
+                next_board.apply_move_sequence(seq)
 
-                state_vec = encode(next_board)
+                # Always encode from WHITE's perspective to match training convention
+                state_vec = encode(next_board, Player.WHITE)
                 x = torch.tensor(state_vec, dtype=torch.float32)
                 output = self.network(x)
                 eq = ValueNetwork.equity(output).item()
