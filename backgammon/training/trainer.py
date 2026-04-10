@@ -31,6 +31,7 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from multiprocessing import Pool
 
 from backgammon.config import Config
 from backgammon.evaluation.metrics import WinRateTracker
@@ -74,6 +75,11 @@ class Trainer:
         self._win_tracker = WinRateTracker(window=1000)
         self._recent_td_errors: deque[float] = deque(maxlen=1000)
         self._recent_game_lengths: deque[int] = deque(maxlen=1000)
+
+        # Persistent worker pool — created once, reused every batch
+        # Eliminates ~2s process-spawn overhead per batch call
+        self._pool = Pool(processes=config.n_workers)
+        print(f"Worker pool started: {config.n_workers} processes")
 
         # Multi-GPU: wrap network with DDP if n_gpus > 1
         self._ddp = False
@@ -148,12 +154,12 @@ class Trainer:
         t0 = time.time()
 
         for step in range(1, total_steps + 1):
-            # --- Parallel game generation (CPU) ---
+            # --- Parallel game generation (CPU, persistent pool) ---
             games_this_step = min(batch_size, n_episodes - episode)
             if games_this_step <= 0:
                 break
 
-            batch = play_batch(self.agent, games_this_step, n_workers)
+            batch = play_batch(self.agent, games_this_step, n_workers, pool=self._pool)
 
             # --- Sequential TD(λ) updates (GPU) ---
             for trajectory, result in batch:
@@ -205,7 +211,13 @@ class Trainer:
             if episode % checkpoint_every < batch_size:
                 self._save_checkpoint(episode)
 
-        self._save_checkpoint(episode)
+        # Final checkpoint (only if not already saved this step)
+        if episode % checkpoint_every >= batch_size:
+            self._save_checkpoint(episode)
+
+        self._pool.close()
+        self._pool.join()
+
         if self._wandb_run is not None:
             self._wandb_run.finish()
         print("Training complete.")

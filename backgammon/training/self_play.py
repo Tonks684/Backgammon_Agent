@@ -112,6 +112,7 @@ def play_batch(
     agent,
     total_games: int,
     n_workers: int,
+    pool: Pool | None = None,
 ) -> list[tuple[list[tuple[np.ndarray, np.ndarray]], GameResult]]:
     """Play total_games games across n_workers parallel CPU processes.
 
@@ -124,10 +125,10 @@ def play_batch(
         Total number of games to play across all workers.
     n_workers:
         Number of parallel CPU processes.
-
-    Returns
-    -------
-    List of (trajectory, result) pairs, one per game.
+    pool:
+        Optional persistent Pool. Pass a long-lived Pool from the Trainer
+        to avoid the per-batch process spawn overhead (~2s per batch).
+        If None, a temporary Pool is created and destroyed for this call.
 
     Scaling
     -------
@@ -139,7 +140,6 @@ def play_batch(
     state_dict = {k: v.cpu() for k, v in agent.network.state_dict().items()}
 
     games_per_worker = max(1, total_games // n_workers)
-    # Handle remainder so we always hit total_games
     worker_counts = [games_per_worker] * n_workers
     remainder = total_games - games_per_worker * n_workers
     for i in range(remainder):
@@ -158,8 +158,10 @@ def play_batch(
         if count > 0
     ]
 
-    with Pool(processes=len(args)) as pool:
+    if pool is not None:
         nested = pool.map(_worker_fn, args)
+    else:
+        with Pool(processes=len(args)) as p:
+            nested = p.map(_worker_fn, args)
 
-    # Flatten list-of-lists into a single list
     return [item for batch in nested for item in batch]
