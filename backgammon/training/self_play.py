@@ -140,8 +140,13 @@ def play_batch(
     On Lightning.ai free plan: n_workers=32 matches the 32-core CPU Studio.
     On a beefier VM: n_workers=64 or higher.
     """
-    # Snapshot weights as CPU tensors — safe to pickle across processes
-    state_dict = {k: v.cpu() for k, v in agent.network.state_dict().items()}
+    # Snapshot weights as CPU tensors — safe to pickle across processes.
+    # torch.compile wraps the network with _orig_mod prefix — unwrap first
+    # so workers can load into a plain ValueNetwork without key mismatches.
+    network = agent.network
+    if hasattr(network, "_orig_mod"):
+        network = network._orig_mod
+    state_dict = {k: v.cpu() for k, v in network.state_dict().items()}
 
     games_per_worker = max(1, total_games // n_workers)
     worker_counts = [games_per_worker] * n_workers
