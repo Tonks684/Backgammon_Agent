@@ -219,7 +219,7 @@ class Trainer:
         with open(self._checkpoint_dir / f"checkpoint_{episode:08d}.json", "w") as f:
             json.dump(meta, f, indent=2)
 
-        print(f"  Checkpoint saved → {ckpt_path}")
+        print(f"  Checkpoint saved -> {ckpt_path}")
 
     def _run_gnubg_eval(self, episode: int) -> None:
         """Run a gnubg evaluation and log results."""

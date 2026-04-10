@@ -260,6 +260,7 @@ sudo apt-get install -y gnubg python3-pip python3-venv
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+pip install -e .   # installs the backgammon package in editable mode
 ```
 
 ### Training
