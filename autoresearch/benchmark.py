@@ -21,7 +21,6 @@ import argparse
 import multiprocessing
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -37,8 +36,19 @@ BENCH_PARAMS = {
 
 
 # ---------------------------------------------------------------------------
-# Worker — must be top-level for spawn
+# Workers — must be top-level for spawn
 # ---------------------------------------------------------------------------
+
+def _bench_worker_proc(job: dict, queue) -> None:
+    """Wrapper so result goes into a Queue (non-daemon Process pattern)."""
+    try:
+        result = _bench_worker(job)
+    except Exception as e:
+        result = {"episodes": 0, "elapsed": 0, "ep_per_sec": 0,
+                  "peak_vram_mb": 0, "n_workers": job["n_workers"],
+                  "error": str(e)}
+    queue.put(result)
+
 
 def _bench_worker(job: dict) -> dict:
     sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -128,7 +138,9 @@ def main() -> None:
         print(f"  VRAM: {total_vram:.0f} MB total")
     print()
 
-    mp_context = multiprocessing.get_context("spawn")
+    # Use non-daemon Process objects so each experiment can spawn its own
+    # inner Pool for game generation (daemon processes cannot have children).
+    ctx     = multiprocessing.get_context("spawn")
     summary = []
 
     for n_parallel in levels:
@@ -140,13 +152,18 @@ def main() -> None:
             for _ in range(n_parallel)
         ]
 
-        t_round = time.time()
-        results = []
+        t_round  = time.time()
+        queue    = ctx.Queue()
+        procs    = [
+            ctx.Process(target=_bench_worker_proc, args=(j, queue))
+            for j in jobs
+        ]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join()
 
-        with ProcessPoolExecutor(max_workers=n_parallel, mp_context=mp_context) as ex:
-            futures = [ex.submit(_bench_worker, j) for j in jobs]
-            for f in as_completed(futures):
-                results.append(f.result())
+        results = [queue.get() for _ in procs]
 
         round_time   = time.time() - t_round
         total_ep     = sum(r["episodes"]    for r in results)

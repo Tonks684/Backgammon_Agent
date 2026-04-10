@@ -21,9 +21,9 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import multiprocessing
 import random
 import sys
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import product
 from pathlib import Path
 
@@ -43,8 +43,18 @@ RESULTS_FILE      = Path("data/autoresearch_results.jsonl")
 LOG_DIR           = Path("data/autoresearch_logs")
 
 # ---------------------------------------------------------------------------
-# Worker entry point — must be top-level for ProcessPoolExecutor (spawn)
+# Worker entry points — must be top-level for spawn
 # ---------------------------------------------------------------------------
+
+def _trial_worker_proc(job: dict, queue) -> None:
+    """Wrapper so result goes into a Queue (non-daemon Process pattern)."""
+    try:
+        result = _trial_worker(job)
+    except Exception as e:
+        result = {"experiment_id": job["experiment_id"], "failed": True,
+                  "error": str(e), **job["params"]}
+    queue.put(result)
+
 
 def _trial_worker(job: dict) -> dict:
     """Runs in a subprocess. Calls trial.run_trial() and returns metrics."""
@@ -151,70 +161,74 @@ def main() -> None:
     max_exp    = args.max_experiments
     total_done = len(results)
 
-    # Use 'spawn' context to avoid CUDA fork issues
-    import multiprocessing
-    mp_context = multiprocessing.get_context("spawn")
+    # Use non-daemon Process objects so each experiment can spawn its own
+    # inner Pool for game generation (daemon processes cannot have children).
+    ctx = multiprocessing.get_context("spawn")
 
     try:
-        with ProcessPoolExecutor(max_workers=n_parallel, mp_context=mp_context) as executor:
-            while True:
-                # Build a batch of n_parallel jobs
-                jobs = []
-                for _ in range(n_parallel):
-                    if args.strategy == "grid":
-                        try:
-                            params = next(candidate_iter)
-                        except StopIteration:
-                            break
-                    else:
-                        params = _random_params()
+        while True:
+            # Build a batch of n_parallel jobs
+            jobs = []
+            for _ in range(n_parallel):
+                if args.strategy == "grid":
+                    try:
+                        params = next(candidate_iter)
+                    except StopIteration:
+                        break
+                else:
+                    params = _random_params()
 
-                    jobs.append({
-                        "params":        params,
-                        "n_workers":     n_workers,
-                        "experiment_id": experiment_id,
-                    })
-                    experiment_id += 1
+                jobs.append({
+                    "params":        params,
+                    "n_workers":     n_workers,
+                    "experiment_id": experiment_id,
+                })
+                experiment_id += 1
 
-                if not jobs:
-                    print("Grid search complete.")
-                    break
+            if not jobs:
+                print("Grid search complete.")
+                break
 
-                print(f"\n=== Round: {n_parallel} experiments in parallel ===")
-                for j in jobs:
-                    print(f"  [Exp {j['experiment_id']}] {j['params']}")
+            print(f"\n=== Round: {len(jobs)} experiments in parallel ===")
+            for j in jobs:
+                print(f"  [Exp {j['experiment_id']}] {j['params']}")
 
-                futures = {executor.submit(_trial_worker, j): j for j in jobs}
-                round_results = []
+            queue = ctx.Queue()
+            procs = [
+                ctx.Process(target=_trial_worker_proc, args=(j, queue))
+                for j in jobs
+            ]
+            for p in procs:
+                p.start()
+            for p in procs:
+                p.join()
 
-                for future in as_completed(futures):
-                    metrics = future.result()
-                    job     = futures[future]
-                    exp_id  = job["experiment_id"]
+            for _ in procs:
+                metrics = queue.get()
+                exp_id  = metrics.get("experiment_id", "?")
 
-                    if metrics.get("failed"):
-                        print(f"  [Exp {exp_id}] FAILED")
-                        continue
+                if metrics.get("failed"):
+                    print(f"  [Exp {exp_id}] FAILED: {metrics.get('error','')}")
+                    continue
 
-                    results.append(metrics)
-                    round_results.append(metrics)
-                    _save_result(metrics)
-                    total_done += 1
+                results.append(metrics)
+                _save_result(metrics)
+                total_done += 1
 
-                    marker = ""
-                    if metrics["val_bpb"] < best_val_bpb:
-                        best_val_bpb = metrics["val_bpb"]
-                        marker = "  <-- NEW BEST"
+                marker = ""
+                if metrics["val_bpb"] < best_val_bpb:
+                    best_val_bpb = metrics["val_bpb"]
+                    marker = "  <-- NEW BEST"
 
-                    print(f"  [Exp {exp_id}] val_bpb={metrics['val_bpb']:.4f}"
-                          f"  win_rate={metrics.get('win_rate',0):.4f}"
-                          f"  episodes={int(metrics.get('episodes',0)):,}{marker}")
+                print(f"  [Exp {exp_id}] val_bpb={metrics['val_bpb']:.4f}"
+                      f"  win_rate={metrics.get('win_rate',0):.4f}"
+                      f"  episodes={int(metrics.get('episodes',0)):,}{marker}")
 
-                _print_leaderboard(results)
+            _print_leaderboard(results)
 
-                if max_exp is not None and total_done >= max_exp:
-                    print(f"Reached max experiments ({max_exp}).")
-                    break
+            if max_exp is not None and total_done >= max_exp:
+                print(f"Reached max experiments ({max_exp}).")
+                break
 
     except KeyboardInterrupt:
         print("\nInterrupted.")
