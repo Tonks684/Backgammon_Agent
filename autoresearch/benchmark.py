@@ -111,8 +111,8 @@ def _bench_worker(job: dict) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--budget",      type=int, default=30,
-                        help="Seconds per trial (default: 30)")
+    parser.add_argument("--budget",      type=int, default=120,
+                        help="Seconds per trial (default: 120)")
     parser.add_argument("--max-parallel", type=int, default=16,
                         help="Highest N_PARALLEL to test (default: 16)")
     args = parser.parse_args()
@@ -127,7 +127,7 @@ def main() -> None:
     print(f"Autoresearch parallelism benchmark")
     print(f"  Trial budget : {budget}s each")
     print(f"  Levels       : {levels}")
-    print(f"  Total time   : ~{len(levels) * (budget + 10) // 60 + 1} min")
+    print(f"  Total time   : ~{len(levels) * (budget + 15) // 60 + 1} min")
     print("=" * 60)
 
     import torch

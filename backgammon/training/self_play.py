@@ -100,10 +100,8 @@ def _worker_fn(args: tuple) -> list[tuple]:
 
     network = ValueNetwork(hidden_size=hidden_size, n_hidden_layers=n_hidden_layers)
     network.load_state_dict(state_dict)
-
-    # compile on CPU for faster per-move inference in workers
-    if hasattr(torch, "compile"):
-        network = torch.compile(network)
+    # Note: torch.compile is NOT used in workers — JIT warmup cost per spawned
+    # process (~30-60s) far outweighs any inference speedup on small CPU batches.
 
     cfg = Config(alpha=alpha, lambda_=lambda_,
                  hidden_size=hidden_size, n_hidden_layers=n_hidden_layers)
