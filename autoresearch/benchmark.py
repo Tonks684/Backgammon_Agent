@@ -56,7 +56,7 @@ def _bench_worker(job: dict) -> dict:
     sys.path.insert(0, str(Path(__file__).parent.parent))
     import time
     import torch
-    from multiprocessing import Pool
+    import multiprocessing
     from backgammon.agents.td_lambda import TDLambdaAgent
     from backgammon.config import Config
     from backgammon.models.mlp import ValueNetwork
@@ -66,32 +66,40 @@ def _bench_worker(job: dict) -> dict:
     n_workers = job["n_workers"]
     budget    = job["budget_seconds"]
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats()
+    # CRITICAL: create Pool BEFORE initialising CUDA.
+    # Forking after CUDA is initialised causes deadlocks on Linux.
+    # Use spawn context so workers start clean regardless of parent state.
+    ctx  = multiprocessing.get_context("spawn")
+    pool = ctx.Pool(processes=n_workers)
 
-    config = Config(
-        alpha=params["ALPHA"], lambda_=params["LAMBDA"],
-        hidden_size=params["HIDDEN_SIZE"], n_hidden_layers=params["N_HIDDEN_LAYERS"],
-        batch_size=params["BATCH_SIZE"], n_workers=n_workers,
-    )
-    network = ValueNetwork(
-        hidden_size=params["HIDDEN_SIZE"],
-        n_hidden_layers=params["N_HIDDEN_LAYERS"],
-    )
-    # No torch.compile here — JIT warmup dominates short budgets on CPU workers
+    try:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats()
 
-    agent = TDLambdaAgent(network=network, config=config, device=device)
+        config = Config(
+            alpha=params["ALPHA"], lambda_=params["LAMBDA"],
+            hidden_size=params["HIDDEN_SIZE"], n_hidden_layers=params["N_HIDDEN_LAYERS"],
+            batch_size=params["BATCH_SIZE"], n_workers=n_workers,
+        )
+        network = ValueNetwork(
+            hidden_size=params["HIDDEN_SIZE"],
+            n_hidden_layers=params["N_HIDDEN_LAYERS"],
+        )
+        agent = TDLambdaAgent(network=network, config=config, device=device)
 
-    t0      = time.time()
-    episode = 0
+        t0      = time.time()
+        episode = 0
 
-    with Pool(processes=n_workers) as pool:
         while time.time() - t0 < budget:
             batch = play_batch(agent, params["BATCH_SIZE"], n_workers, pool=pool)
             for trajectory, result in batch:
                 agent.update(trajectory, result)
                 episode += 1
+
+    finally:
+        pool.close()
+        pool.join()
 
     elapsed   = time.time() - t0
     peak_vram = (torch.cuda.max_memory_allocated() / 1e6

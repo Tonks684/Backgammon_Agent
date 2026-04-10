@@ -9,9 +9,9 @@ train.py is kept as a thin wrapper around run_trial() for standalone use.
 
 from __future__ import annotations
 
+import multiprocessing
 import random
 import time
-from multiprocessing import Pool
 from pathlib import Path
 import sys
 
@@ -93,6 +93,10 @@ def run_trial(params: dict, n_workers: int = 32) -> dict | None:
             eval_dir="data/autoresearch_evals/",
         )
 
+        # Create Pool BEFORE initialising CUDA to avoid fork-after-CUDA deadlock.
+        ctx  = multiprocessing.get_context("spawn")
+        pool = ctx.Pool(processes=n_workers)
+
         network = ValueNetwork(hidden_size=hidden_size, n_hidden_layers=n_hidden_layers)
         if hasattr(torch, "compile"):
             network = torch.compile(network)
@@ -102,12 +106,15 @@ def run_trial(params: dict, n_workers: int = 32) -> dict | None:
         t0 = time.time()
         episode = 0
 
-        with Pool(processes=n_workers) as pool:
+        try:
             while time.time() - t0 < BUDGET_SECONDS:
                 batch = play_batch(agent, batch_size, n_workers, pool=pool)
                 for trajectory, result in batch:
                     agent.update(trajectory, result)
                     episode += 1
+        finally:
+            pool.close()
+            pool.join()
 
         training_seconds = time.time() - t0
         win_rate = evaluate_vs_random(agent, n_games=500)
