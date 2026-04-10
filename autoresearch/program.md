@@ -3,12 +3,13 @@
 ## Objective
 
 Maximise win rate against a random opponent after a 5-minute training run
-on a single GPU. The score is printed as `score: X.XXXX` at the end of
-`train.py` — higher is better (range 0.0–1.0, random baseline ≈ 0.50).
+on a single GPU. The metric is printed as `val_bpb: X.XXXXXX` at the end of
+`train.py` — **lower is better** (val_bpb = 1 - win_rate; range 0.0–1.0,
+random baseline ≈ 0.50).
 
-## Current best known score
+## Current best known val_bpb
 
-score: (update this after each experiment)
+val_bpb: (update this after each experiment — lower is better)
 
 ## What you MAY change in train.py
 
@@ -28,7 +29,7 @@ Everything below the `# TUNABLE PARAMETERS` comment:
 - `BUDGET_SECONDS = 300` (fixed experiment window)
 - `evaluate_vs_random()` function (evaluation must stay consistent)
 - Anything in `backgammon/game/` (board rules, encoder, types are fixed)
-- The final `score: X.XXXX` print format (autoresearch reads this line)
+- The `val_bpb: X.XXXXXX` print format (autoresearch greps for this line)
 
 ## Known issues to investigate
 
