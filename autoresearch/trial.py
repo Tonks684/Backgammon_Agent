@@ -98,8 +98,8 @@ def run_trial(params: dict, n_workers: int = 32) -> dict | None:
         pool = ctx.Pool(processes=n_workers)
 
         network = ValueNetwork(hidden_size=hidden_size, n_hidden_layers=n_hidden_layers)
-        if hasattr(torch, "compile"):
-            network = torch.compile(network)
+        # torch.compile omitted: requires gcc (not in Docker image), and the
+        # bottleneck is CPU game generation, not GPU compute for this MLP.
 
         agent = TDLambdaAgent(network=network, config=config, device=device)
 
