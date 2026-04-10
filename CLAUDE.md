@@ -244,3 +244,54 @@ reinforcement_agents/
 - [arXiv:2504.02221 — Learning and Improving Backgammon Strategy (2025)](https://arxiv.org/abs/2504.02221)
 - [GNU Backgammon](https://www.gnu.org/software/gnubg/)
 - [FIBS](http://www.fibs.com)
+
+---
+
+## Oracle VM Setup
+
+### Initial setup (run once)
+
+```bash
+# System dependencies
+sudo apt-get update
+sudo apt-get install -y gnubg python3-pip python3-venv
+
+# Python environment
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### Training
+
+```bash
+# Default config (500K episodes, eval vs gnubg every 10K)
+python backgammon/main.py train
+
+# Custom episode count with gnubg evaluation enabled
+python backgammon/main.py train --episodes 2000000 --gnubg-eval --skill expert
+
+# Resume from a checkpoint
+python backgammon/main.py train --resume data/checkpoints/latest.pt
+
+# Disable wandb (e.g. for quick smoke-test)
+WANDB_MODE=disabled python backgammon/main.py train --episodes 1000
+```
+
+### Evaluation
+
+```bash
+# Evaluate a saved checkpoint against gnubg expert (100 matches)
+python backgammon/main.py eval --checkpoint data/checkpoints/latest.pt --skill expert
+
+# More matches for a tighter estimate
+python backgammon/main.py eval --checkpoint data/checkpoints/latest.pt \
+    --skill world_class --matches 500
+```
+
+### wandb
+
+Training metrics are logged automatically if `wandb` is installed and
+`WANDB_MODE` is not set to `disabled`.  Per-episode: `td_loss`, `game_length`.
+Per `eval_every`: `self_play_win_rate`, `gammon_rate`.
+Per gnubg eval: `gnubg_{skill}_win_rate`.
