@@ -160,9 +160,23 @@ def main() -> None:
                              "exhaust grid for grid)")
     args = parser.parse_args()
 
+    # Resume: load existing results so leaderboard and best are preserved,
+    # and experiment IDs + log files don't collide with previous runs.
     results: list[dict] = []
     best_val_bpb = float("inf")
-    experiment_id = 1
+    if RESULTS_FILE.exists():
+        with open(RESULTS_FILE, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    r = json.loads(line)
+                    results.append(r)
+                    if r.get("val_bpb", float("inf")) < best_val_bpb:
+                        best_val_bpb = r["val_bpb"]
+        if results:
+            print(f"Resumed: loaded {len(results)} prior results, best val_bpb={best_val_bpb:.4f}")
+
+    experiment_id = max((r.get("experiment_id", 0) for r in results), default=0) + 1
 
     if args.strategy == "grid":
         candidates = _grid_params()
