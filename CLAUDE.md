@@ -247,6 +247,81 @@ reinforcement_agents/
 
 ---
 
+## Performance Design Principles
+
+These were learned during active development and should guide future changes.
+
+### Bottleneck: CPU game generation, not GPU compute
+The ValueNetwork (54→128→4 MLP) is tiny. The H200/A100 is underutilised during
+training. Time is dominated by:
+1. **Python game logic** in `board.py` (legal move generation, board copies)
+2. **Per-move forward passes** in `select_move` if evaluated serially
+
+Do not reach for GPU-specific optimisations (Flash Attention, fp16, etc.) until
+you have confirmed the GPU is the bottleneck. It almost certainly isn't for Phase 1.
+
+### select_move must batch all legal moves into one forward pass
+`select_move` is called hundreds of times per game × 32 workers. Each call must
+stack all resulting board states into a single tensor and call `self.network`
+once. Never loop over legal moves with individual forward passes — this was a
+~10-20x throughput regression.
+
+### Use a persistent multiprocessing Pool
+`play_batch` accepts an optional `pool` argument. Always pass a long-lived Pool
+created once at startup. Creating a new Pool per batch adds ~2s spawn overhead
+per batch, which dominates a 300s budget.
+
+### Parallel autoresearch: split CPU workers across experiments
+When running N experiments simultaneously (all sharing one GPU via
+time-multiplexing), each experiment gets `32 // N` CPU workers.
+- Run `python autoresearch/benchmark.py` first to find the optimal `--parallel`
+  value for the current hardware before committing to overnight runs.
+- Optimal N is usually where total ep/s peaks — often 4–8 on a 32-core machine.
+
+### torch.compile
+Add `torch.compile(network)` wherever a ValueNetwork is created (main.py,
+self_play.py workers). Gives ~2-4x faster forward passes via kernel fusion.
+Guard with `if hasattr(torch, "compile")` for backward compatibility.
+
+### What NOT to optimise (for Phase 1 MLP)
+- **Flash Attention** — not applicable, no attention mechanism
+- **Mixed precision (fp16/bf16)** — negligible benefit for a 54→4 MLP
+- **DDP / multi-GPU** — config hook exists (`n_gpus`), but single GPU is fine
+  for Phase 1. Only relevant at Phase 2 scale.
+
+---
+
+## Autoresearch Setup (Lightning.ai)
+
+Hyperparameter search for TD(λ) using `autoresearch/`:
+
+| File | Role |
+|---|---|
+| `autoresearch/trial.py` | Training logic as a callable `run_trial(params, n_workers)` |
+| `autoresearch/agent.py` | Parallel search loop — runs N trials simultaneously |
+| `autoresearch/train.py` | Thin standalone wrapper around `trial.py` |
+| `autoresearch/benchmark.py` | Dry run to find optimal `--parallel` setting |
+| `autoresearch/program.md` | Parameter grid and search strategy notes |
+
+```bash
+# Step 1: find optimal parallelism (takes ~8 min, cheap)
+docker run --rm -it --gpus all -v $(pwd)/data:/workspace/data \
+  backgammon-rl python autoresearch/benchmark.py
+
+# Step 2: overnight run with recommended --parallel N
+docker run --rm -it --gpus all -v $(pwd)/data:/workspace/data \
+  -e WANDB_MODE=disabled backgammon-rl \
+  bash autoresearch/run.sh --parallel N
+
+# Results accumulate in data/autoresearch_results.jsonl (persists across restarts)
+# Resume is automatic — agent.py loads prior results on startup
+```
+
+Metric: `val_bpb = 1 - win_rate` (lower is better). Each experiment runs for
+`BUDGET_SECONDS=300`. At --parallel 4, expect ~320 experiments overnight.
+
+---
+
 ## Oracle VM Setup
 
 ### Initial setup (run once)
