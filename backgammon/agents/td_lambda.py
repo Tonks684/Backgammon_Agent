@@ -75,29 +75,31 @@ class TDLambdaAgent:
         if not legal_move_sequences:
             return []
 
-        best_seq: list[Move] = []
-        best_equity = float("-inf")
-
         self.network.eval()
         with torch.no_grad():
+            # Build all resulting states in one pass, then evaluate as a batch.
+            # This replaces N serial forward passes with a single batched call —
+            # critical because select_move is called hundreds of times per game.
+            state_vecs = []
             for seq in legal_move_sequences:
-                # Apply move sequence to a scratch copy of the board
                 next_board = board.copy()
                 next_board.apply_move_sequence(seq)
+                state_vecs.append(encode(next_board, Player.WHITE))
 
-                # Always encode from WHITE's perspective to match training convention
-                state_vec = encode(next_board, Player.WHITE)
-                x = torch.tensor(state_vec, dtype=torch.float32, device=self.device)
-                output = self.network(x)
-                eq = ValueNetwork.equity(output).item()
+            # Shape: (N, 54)
+            x_batch = torch.tensor(
+                np.stack(state_vecs), dtype=torch.float32, device=self.device
+            )
+            # Shape: (N, 4) -> (N,)
+            equities = ValueNetwork.equity(self.network(x_batch))
 
-                # White maximises equity; black minimises it
-                signed_eq = eq if player == Player.WHITE else -eq
-                if signed_eq > best_equity:
-                    best_equity = signed_eq
-                    best_seq = seq
+            # White maximises equity; black minimises it
+            if player == Player.WHITE:
+                best_idx = int(equities.argmax().item())
+            else:
+                best_idx = int(equities.argmin().item())
 
-        return best_seq
+        return legal_move_sequences[best_idx]
 
     # ------------------------------------------------------------------
     # Training update

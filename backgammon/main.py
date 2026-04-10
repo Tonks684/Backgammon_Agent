@@ -142,6 +142,12 @@ def _build_agent(config, checkpoint: str | None = None):
             hidden_size=config.hidden_size,
             n_hidden_layers=config.n_hidden_layers,
         )
+
+    # Compile the network for faster forward passes (PyTorch 2.x+)
+    if hasattr(torch, "compile"):
+        network = torch.compile(network)
+        print("torch.compile enabled")
+
     return TDLambdaAgent(network=network, config=config, device=device)
 
 

@@ -101,6 +101,10 @@ def _worker_fn(args: tuple) -> list[tuple]:
     network = ValueNetwork(hidden_size=hidden_size, n_hidden_layers=n_hidden_layers)
     network.load_state_dict(state_dict)
 
+    # compile on CPU for faster per-move inference in workers
+    if hasattr(torch, "compile"):
+        network = torch.compile(network)
+
     cfg = Config(alpha=alpha, lambda_=lambda_,
                  hidden_size=hidden_size, n_hidden_layers=n_hidden_layers)
     agent = TDLambdaAgent(network, cfg, device=torch.device("cpu"))
