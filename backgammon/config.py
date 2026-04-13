@@ -8,26 +8,27 @@ from typing import Optional
 @dataclass
 class Config:
     # TD learning hyperparameters
-    alpha: float = 0.1
-    lambda_: float = 0.7
+    # Best config from 29-trial autoresearch on H200 (exp #7, val_bpb=0.038)
+    alpha: float = 0.01
+    lambda_: float = 0.9
 
     # Network architecture
     hidden_size: int = 128
-    n_hidden_layers: int = 2
+    n_hidden_layers: int = 3
 
     # Training schedule
-    n_episodes: int = 500_000
-    eval_every: int = 10_000
-    checkpoint_every: int = 50_000
+    n_episodes: int = 50_000   # first run on 16-core Oracle VM (~7-9 hrs); increase once gnubg signal confirmed
+    eval_every: int = 5_000
+    checkpoint_every: int = 10_000
 
     # Paths
     checkpoint_dir: str = "data/checkpoints/"
     eval_dir: str = "data/evals/"
 
-    # Parallelism — scale these up as resources grow
-    n_workers: int = 32        # CPU workers for parallel game generation
-    batch_size: int = 32       # trajectories collected before each update step
-    n_gpus: int = 1            # set >1 to enable multi-GPU (triggers DDP)
+    # Parallelism — Oracle VM has 16 cores; reserve 2 for OS
+    n_workers: int = 14        # CPU workers for parallel game generation
+    batch_size: int = 64       # trajectories collected before each update step
+    n_gpus: int = 0            # no GPU on free Oracle VM
 
     # Logging
     wandb_project: str = "backgammon-rl"
