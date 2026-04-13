@@ -18,7 +18,7 @@ class Config:
 
     # Training schedule
     n_episodes: int = 50_000   # first run on 16-core Oracle VM (~7-9 hrs); increase once gnubg signal confirmed
-    eval_every: int = 5_000
+    eval_every: int = 2_000
     checkpoint_every: int = 10_000
 
     # Paths
